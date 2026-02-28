@@ -10,18 +10,43 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # --- INICIALIZACIÓN FIREBASE ---
+db = None
 if not firebase_admin._apps:
     try:
-        cred = credentials.Certificate("firebase-key.json")
-        firebase_admin.initialize_app(cred)
-    except Exception:
-        # Fallback para entornos donde no esté el JSON (ej. Streamlit Cloud Secrets)
-        firebase_admin.initialize_app()
-db = firestore.client()
+        if "firebase" in st.secrets:
+            # Para Streamlit Cloud (Despliegue)
+            firebase_creds = dict(st.secrets["firebase"])
+            # Corregir saltos de línea en la clave privada si vienen escapados
+            if "private_key" in firebase_creds:
+                firebase_creds["private_key"] = firebase_creds["private_key"].replace("\\n", "\n")
+            cred = credentials.Certificate(firebase_creds)
+            firebase_admin.initialize_app(cred)
+            db = firestore.client()
+        else:
+            # Para desarrollo local
+            cred = credentials.Certificate("firebase-key.json")
+            firebase_admin.initialize_app(cred)
+            db = firestore.client()
+    except Exception as e:
+        st.warning("⚠️ Conectando en Modo Offline: Las funciones en vivo (Firebase) no estarán disponibles.")
+        # Fallback para evitar errores de referencia si algo falla
+        if not firebase_admin._apps:
+            try:
+                firebase_admin.initialize_app()
+                db = firestore.client()
+            except:
+                db = None
+else:
+    try:
+        db = firestore.client()
+    except:
+        db = None
 
 # --- FUNCIONES DE INTELIGENCIA FIREBASE ---
 def log_activity(action, details=""):
     """Registra una acción en la base de datos de auditoría"""
+    if db is None:
+        return
     try:
         db.collection('activity_logs').add({
             'timestamp': firestore.SERVER_TIMESTAMP,
@@ -34,6 +59,8 @@ def log_activity(action, details=""):
 
 def get_insights():
     """Recupera los últimos insights guardados por usuarios"""
+    if db is None:
+        return []
     try:
         docs = db.collection('strategic_insights').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(5).stream()
         return [doc.to_dict() for doc in docs]
@@ -42,6 +69,8 @@ def get_insights():
 
 def add_insight(text):
     """Guarda un nuevo insight estratégico en la nube"""
+    if db is None:
+        return False
     if text:
         try:
             db.collection('strategic_insights').add({
@@ -375,6 +404,11 @@ st.markdown("""
 # 3. Datos Maestro (Firestore)
 @st.cache_data
 def load_all_market_data():
+    if db is None:
+        # Aquí cargaríamos un CSV local si db falla, pero en este dash 
+        # asumiremos que los datos son estáticos en este punto o avisaremos
+        st.error("❌ No se pudo conectar a Firebase. Por favor configure los Secrets en Streamlit Cloud.")
+        return pd.DataFrame()
     try:
         # Consultar la colección en la nube
         docs = db.collection('market_data').order_by('year').stream()
@@ -497,14 +531,17 @@ with st.sidebar:
     # Hub de Inteligencia en Vivo
     st.markdown('<p style="font-weight: 700; color: #1e3a8a; margin-bottom: 5px;"><span class="live-pulse"></span>INTELIGENCIA EN VIVO</p>', unsafe_allow_html=True)
     
-    try:
-        logs = db.collection('activity_logs').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(3).stream()
-        for log in logs:
-            l = log.to_dict()
-            time_str = l['timestamp'].strftime('%H:%M:%S') if l.get('timestamp') else "--:--:--"
-            st.markdown(f'<div class="intel-log">[{time_str}] {l["action"]}</div>', unsafe_allow_html=True)
-    except Exception:
-        st.markdown('<div class="intel-log">[SISTEMA] Conexión Activa</div>', unsafe_allow_html=True)
+    if db is not None:
+        try:
+            logs = db.collection('activity_logs').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(3).stream()
+            for log in logs:
+                l = log.to_dict()
+                time_str = l['timestamp'].strftime('%H:%M:%S') if l.get('timestamp') else "--:--:--"
+                st.markdown(f'<div class="intel-log">[{time_str}] {l["action"]}</div>', unsafe_allow_html=True)
+        except Exception:
+            st.markdown('<div class="intel-log">[SISTEMA] Conexión Activa</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="intel-log">[OFFLINE] Modo Local Activo</div>', unsafe_allow_html=True)
 
     # Footer de autor en sidebar
     st.markdown(f"""
